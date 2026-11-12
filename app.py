@@ -22,21 +22,20 @@ api_key = os.getenv("GEMINI_API_KEY")
 st.set_page_config(page_title="Agentic AI Data Analyst", page_icon="📊", layout="wide")
 
 if not api_key:
-    st.error("GEMINI_API_KEY not found! Please add it to your .env file.")
+    st.error("GEMINI_API_KEY not found! Please add it to your Secrets or .env file.")
     st.stop()
 
-# Set a 20-second HTTP timeout so requests never hang forever
 client = genai.Client(
     api_key=api_key,
-    http_options=types.HttpOptions(timeout=20000),
+    http_options=types.HttpOptions(timeout=25000),
 )
 
-# Gather only fast Flash models (excluding image/audio/deprecated 2.x)
+# Gather all usable Gemini text/code models
 available_models = [
     m.name.replace("models/", "")
     for m in client.models.list()
     if "gemini" in m.name.lower()
-    and "flash" in m.name.lower()
+    and ("flash" in m.name.lower() or "pro" in m.name.lower())
     and "image" not in m.name.lower()
     and "audio" not in m.name.lower()
     and "tts" not in m.name.lower()
@@ -50,8 +49,8 @@ MODEL_ID = available_models[-1]
 
 
 def generate_with_fallback(contents, config, status_box=None):
-    """Tries fast Flash models with live status updates."""
-    models_to_try = list(dict.fromkeys([MODEL_ID] + available_models[::-1]))[:3]
+    """Tries available models and shows exact error details if one fails."""
+    models_to_try = list(dict.fromkeys([MODEL_ID] + available_models[::-1]))[:6]
     last_error = None
 
     for model_name in models_to_try:
@@ -65,9 +64,10 @@ def generate_with_fallback(contents, config, status_box=None):
             )
         except Exception as e:
             last_error = e
+            short_err = str(e).splitlines()[0][:120]
             if status_box:
-                status_box.write(f"⚠️ `{model_name}` busy, switching model...")
-            time.sleep(1)
+                status_box.write(f"⚠️ `{model_name}` skipped: `{short_err}`")
+            time.sleep(1.5)
     raise last_error
 
 
@@ -126,15 +126,17 @@ def run_analyst_agent(user_question: str, df: pd.DataFrame, df_profile: str, sta
     for attempt in range(1, max_retries + 1):
         if status_box:
             status_box.write(f"🧠 Writing analysis code (Attempt {attempt})...")
-        response = generate_with_fallback(
-            contents="\n\n".join(conversation),
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.1,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-            status_box=status_box,
-        )
+        try:
+            response = generate_with_fallback(
+                contents="\n\n".join(conversation),
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.1,
+                ),
+                status_box=status_box,
+            )
+        except Exception as e:
+            return f"❌ **API Error:** `{e}`\n\nPlease wait a few seconds and try again.", None, None
         
         ai_text = response.text or ""
         code = extract_python_code(ai_text)
@@ -168,14 +170,14 @@ def run_analyst_agent(user_question: str, df: pd.DataFrame, df_profile: str, sta
         "Provide a clear, concise data analyst summary based ONLY on the output above. Highlight key numbers in bold."
     )
 
-    final_response = generate_with_fallback(
-        contents=synthesis_prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-        status_box=status_box,
-    )
+    try:
+        final_response = generate_with_fallback(
+            contents=synthesis_prompt,
+            config=types.GenerateContentConfig(temperature=0.3),
+            status_box=status_box,
+        )
+    except Exception as e:
+        return f"❌ **API Error during summary:** `{e}`", executed_code, None
 
     chart_bytes = None
     if chart_created and os.path.exists("temp_chart.png"):
@@ -186,7 +188,7 @@ def run_analyst_agent(user_question: str, df: pd.DataFrame, df_profile: str, sta
 
 # 3. Streamlit User Interface
 st.title("📊 Agentic AI Data Analyst")
-st.caption(f"Primary model: `{MODEL_ID}` | Fallbacks ready: `{', '.join(available_models[:3])}`")
+st.caption(f"Primary model: `{MODEL_ID}` | Fallbacks ready: `{', '.join(available_models[:4])}`")
 
 with st.sidebar:
     st.header("1. Upload Dataset")
@@ -230,7 +232,7 @@ if uploaded_file is not None:
                 answer, code_used, chart_img = run_analyst_agent(
                     prompt, df, st.session_state.df_profile, status_box=status
                 )
-                status.update(label="✅ Analysis complete!", state="complete", expanded=False)
+                status.update(label="✅ Done!", state="complete", expanded=False)
             st.markdown(answer)
             if chart_img:
                 st.image(chart_img)

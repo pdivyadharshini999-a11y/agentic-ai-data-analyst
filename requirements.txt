@@ -6,3 +6,5 @@ matplotlib
 seaborn
 openpyxl
 python-dotenv
+tabulate
+
